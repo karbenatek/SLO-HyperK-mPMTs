@@ -11,6 +11,7 @@
 #include <TMath.h>
 
 Double_t FunG0(Double_t *x, Double_t *par){
+//fdfdsf
 	Float_t xx = x[0];
 	Double_t Q0 = par[0];
 	Double_t sig0 = par[1];
