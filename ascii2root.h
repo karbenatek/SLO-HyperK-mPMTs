@@ -3,12 +3,18 @@
 
 #include <iostream>
 #include <string>
+#include <map>
+#include <set>
 #include <fstream>
 #include <vector>
 #include <filesystem>
+namespace fs = std::filesystem;
 #include <TFile.h>
 #include <TTree.h>
 #include "ascii2root.h"
+#include "json.hpp"
+using json = nlohmann::json;
+
 int n_digit(int number) {
    int count = 0;
    while(number != 0) {
@@ -40,7 +46,7 @@ void GetFileInfo(ifstream & file, int & fpos_Wfm, int & fpos_h, int & n_Wfm, int
 	
 	
 }
-void ParseWfm(ifstream & file, TTree * fChain, int & fpos_Wfm, int & fpos_h, int & i_Wfm, int & i_Seg, string & Date,	double & TimeSinceSeg1, vector<double> & x, vector<float> & t){
+void ParseWfm(ifstream & file, int & fpos_Wfm, int & fpos_h, int & i_Wfm, int & i_Seg, char Date[21],	double & TimeSinceSeg1, vector<double> & x, vector<float> & t){
 
 	//some parsed values used in process
 	double Ampl;//->x
@@ -57,7 +63,8 @@ void ParseWfm(ifstream & file, TTree * fChain, int & fpos_Wfm, int & fpos_h, int
 	i_Seg = std::stoi(l,&sz);
 	++i_Wfm;
 	l = l.substr(sz+1); //date, time since segment1... date format = 01-Aug-2022 11:55:02 ... 20 chars
-	Date = l.substr(0,20);
+	string sDate = l.substr(0,20);
+	for (int i = 0; i < sDate.size(); ++i) Date[i] = sDate[i];
 	l = l.substr(21);
 	TimeSinceSeg1 = stod(l);
 	fpos_h = file.tellg();
@@ -65,95 +72,123 @@ void ParseWfm(ifstream & file, TTree * fChain, int & fpos_Wfm, int & fpos_h, int
 	file.seekg(fpos_Wfm,file.beg);
 	t.clear();
 	x.clear();
+	int i = 0;
 	while(1) {
+		
 		p_Time = Time;
 		fpos_Wfm = file.tellg();
 		file.getline(line,64);
-		if(file.eof()) return;
 		l = line;
+		if(file.eof() || l.empty()) return;
 		Time = stof(l, &sz);
 		l = l.substr(sz+1);
-		Ampl = stod(l);		
+		Ampl = stod(l);
+		
 		if (Time >= p_Time){
 			t.push_back(Time);
 			x.push_back(Ampl);
+			++i;
 		}
-		else{
-			fChain->Fill();
-			break;
-		}	
+		else break;
 	}
 }
 
 
-void ProcessFile(const string fPath, TFile * fOut, TTree * fChain, int & i_Wfm, int & i_Seg, string & Date, double & TimeSinceSeg1, vector<double> & x, vector<float> & t){
-	//cout<<Fpath<<endl;
-
+void ProcessFile(const string fPath, TFile * fOut, TTree * fChain, int & i_Wfm, int & i_Seg, char Date[21], double & TimeSinceSeg1, vector<double> & x, vector<float> & t){
 	ifstream file;
 	file.open(fPath, std::fstream::in);
-	//char line[64];
-	//file.getline(line,64);
-	
 
-	
-	
-	
 	int fpos_Wfm = 0;
 	int fpos_h = 0;
 	int n_Wfm;//# of Wfms
 	int n_Seg;//# of samples in Wfm aka segment
 
 	GetFileInfo(file, fpos_Wfm, fpos_h, n_Wfm, n_Seg);
-	cout<<"Running - "<<fPath<<endl<<"#wfms = "<<n_Wfm<<endl;
-
-	while (!file.eof()) {
-		ParseWfm( file, fChain, fpos_Wfm, fpos_h, i_Wfm, i_Seg, Date, TimeSinceSeg1, x, t);
+	cout<<"Processing - "<<fPath<<endl;
+	while (true) {
+		
+		ParseWfm( file, fpos_Wfm, fpos_h, i_Wfm, i_Seg, Date, TimeSinceSeg1, x, t);
+		fChain->Fill();
 		if (i_Seg % 1000 == 0) cout<<i_Seg<<"/"<<n_Wfm<<endl;
+		if (file.eof())break;
 	}
 
 	file.close();
-	cout<<"Done"<<endl;
 }
 
 void ProcessDirData(string DataDir = "",string suffix = ".txt"){
-	string fDataName = "OscLecData_"+DataDir+".root";
+	string fDataName = DataDir + "/OscLecData.root";
+	string fCfg = DataDir + "/cfg.json";
+	
+	//create output file and copy config file from .
 	TFile * fOut = new TFile(fDataName.data(),"recreate");
 	TTree * fChain = new TTree("OscLecData","Waveforms from LECROYWM806Zi-B");
+	fs::copy("cfg.json", fCfg, fs::copy_options::skip_existing);
 
-	//parsed variables	
+	//parsed variables
 	int i_Wfm = 0; 
 	int i_Seg; 
-	string Date; 
+	
+	char Date[22]; 
 	double TimeSinceSeg1; 
 	vector<double> x; 
 	vector<float> t;
 
-
 	//def branches
 	fChain->Branch("i_Wfm", &i_Wfm);
 	fChain->Branch("i_Seg", &i_Seg);
-	fChain->Branch("Date", &Date,21,0);
+	fChain->Branch("Date", Date, "Date/C", 22);
 	fChain->Branch("TimeSinceSeg1",&TimeSinceSeg1);
 	fChain->Branch("x",&x);
 	fChain->Branch("t",&t);
 	
 	string fPath;
 	if (DataDir.empty()) DataDir = "Data";
-	const std::filesystem::path dirPath{DataDir};
-	for (auto const& dir_entry : std::filesystem::directory_iterator{dirPath}){
-		fPath = dir_entry.path();
-		if( fPath.find(suffix,0) <= fPath.length() ) {
+	
+	set<fs::path> sorted_paths;
+	
+	for (auto &dir_entry : fs::directory_iterator(DataDir)){
+		sorted_paths.insert(dir_entry.path());
+	}
+	
+	for (auto &filename : sorted_paths ){
+		fPath = filename.c_str();		
+		if( (fPath.find(suffix,0) <= fPath.length()) &&  fPath.find("/C") <= fPath.length()) {
 			ProcessFile(fPath, fOut, fChain, i_Wfm, i_Seg, Date, TimeSinceSeg1, x, t);
 		}
 	}
 	fOut->Write();
 	fOut->Close();
-	return;	
+	cout<<"Data were seccessfully writen to file "<<fDataName<<endl;	
 }
-void test(string text){
+
+//~ void test(){
+	//~ string fDataName = "cfg.json";
+	//~ ifstream cfg_file(fDataName);
+	//~ json cfg = json::parse(cfg_file);
+	//~ json fit = cfg["fit"];
+	//~ for (auto it = fit.begin(); it != fit.end(); ++it){
+		//~ cout << "key: " << it.key() << ", value:" << it.value() << '\n';
+	//~ }
+	//~ cfg_file.close();
+//~ }
+//~ void test(){
+	//~ ofstream file;
+	//~ file.open("test.txt", std::ofstream::trunc);
+	//~ file << "blabla"<<"\n";
+	//~ if(!file) cout<<"file does not exist"<<endl;
+	//~ else cout<<"file already exist"<<endl;
+	//~ file.close();
+//~ }
+void test(){
+	string text1 = "blabla/04";
+	string text2 = "blabla";
+	string DataName = text2;
+	string fFitImg;
+	if (DataName.rfind('/') < DataName.length()) fFitImg = DataName + "/FitImg_" + DataName.substr(DataName.rfind('/')+1) + ".png";
+	else fFitImg = DataName + "/FitImg_" + DataName + ".png";
+	cout<<fFitImg<<endl;
 	
-	cout<<"hihi"+text<<endl;
-
+	
 }
-
 #endif
